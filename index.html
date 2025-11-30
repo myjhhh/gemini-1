@@ -1,0 +1,495 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Immersive Hand Particles (No Camera View)</title>
+    <style>
+        body { margin: 0; overflow: hidden; background-color: #050505; font-family: 'Segoe UI', sans-serif; }
+        canvas { display: block; }
+        
+        /* UI Container */
+        #ui-container {
+            position: absolute;
+            top: 20px;
+            right: 20px;
+            width: 300px;
+            padding: 20px;
+            background: rgba(20, 20, 35, 0.7);
+            backdrop-filter: blur(10px);
+            border-radius: 15px;
+            border: 1px solid rgba(255, 255, 255, 0.1);
+            color: white;
+            z-index: 100;
+            box-shadow: 0 10px 30px rgba(0,0,0,0.5);
+            transition: transform 0.3s ease;
+        }
+
+        h2 { margin: 0 0 15px 0; font-size: 18px; letter-spacing: 1px; color: #00d2ff; }
+        
+        /* Controls */
+        .control-group { margin-bottom: 15px; }
+        label { display: block; font-size: 12px; margin-bottom: 5px; color: #aaa; }
+        
+        input[type=range] {
+            width: 100%;
+            -webkit-appearance: none;
+            background: rgba(255,255,255,0.1);
+            height: 4px;
+            border-radius: 2px;
+            outline: none;
+        }
+        input[type=range]::-webkit-slider-thumb {
+            -webkit-appearance: none;
+            width: 16px;
+            height: 16px;
+            background: #00d2ff;
+            border-radius: 50%;
+            cursor: pointer;
+            transition: transform 0.1s;
+        }
+        input[type=range]::-webkit-slider-thumb:hover { transform: scale(1.2); }
+
+        /* Buttons */
+        .btn-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; margin-bottom: 15px; }
+        button {
+            background: rgba(255,255,255,0.05);
+            border: 1px solid rgba(255,255,255,0.2);
+            color: white;
+            padding: 8px;
+            border-radius: 8px;
+            cursor: pointer;
+            transition: all 0.3s;
+            font-size: 12px;
+        }
+        button:hover, button.active { background: #00d2ff; border-color: #00d2ff; color: #000; font-weight: bold; }
+
+        /* Color Picker */
+        input[type=color] {
+            width: 100%;
+            height: 35px;
+            border: none;
+            background: none;
+            cursor: pointer;
+        }
+
+        /* Loading */
+        #loading {
+            position: absolute;
+            top: 50%; left: 50%; transform: translate(-50%, -50%);
+            color: #00d2ff; font-size: 24px; pointer-events: none;
+            text-shadow: 0 0 20px #00d2ff;
+            transition: opacity 0.5s;
+        }
+        
+        /* HIDDEN Video Preview - Still needed for Logic, but hidden from user */
+        #video-preview {
+            display: none; /* 隐藏视频画面 */
+            width: 320px;
+            height: 240px;
+        }
+
+        /* Draw Mode Overlay */
+        #draw-instruction {
+            position: absolute;
+            top: 20px; left: 50%; transform: translateX(-50%);
+            background: rgba(0,0,0,0.6);
+            padding: 10px 20px;
+            border-radius: 20px;
+            color: white;
+            display: none;
+            pointer-events: none;
+            user-select: none;
+        }
+    </style>
+    
+    <!-- Libraries -->
+    <script src="https://cdn.jsdelivr.net/npm/three@0.146.0/build/three.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils/camera_utils.js" crossorigin="anonymous"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/control_utils/control_utils.js" crossorigin="anonymous"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/drawing_utils/drawing_utils.js" crossorigin="anonymous"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/hands/hands.js" crossorigin="anonymous"></script>
+</head>
+<body>
+
+    <div id="loading">正在初始化系统 (请允许摄像头权限以启用交互)...</div>
+    <div id="draw-instruction">按住鼠标在屏幕上绘制</div>
+    
+    <!-- Hidden Camera Feed -->
+    <video id="video-preview" playsinline></video>
+
+    <!-- UI Panel -->
+    <div id="ui-container">
+        <h2>沉浸式粒子系统</h2>
+        
+        <div class="control-group">
+            <label>形态预设</label>
+            <div class="btn-grid">
+                <button onclick="setShape('nebula')" class="active" id="btn-nebula">星云漩涡</button>
+                <button onclick="setShape('heart')" id="btn-heart">破碎之心</button>
+                <button onclick="setShape('sphere')" id="btn-sphere">量子球体</button>
+                <button onclick="toggleDrawMode()" id="btn-draw">手绘自定义</button>
+            </div>
+        </div>
+
+        <div class="control-group">
+            <label>粒子颜色</label>
+            <input type="color" id="colorPicker" value="#00d2ff">
+        </div>
+
+        <div class="control-group">
+            <label>粒子密度 (Count)</label>
+            <input type="range" id="density" min="1000" max="30000" step="1000" value="15000">
+        </div>
+
+        <div class="control-group">
+            <label>基础扩散度 (Spread)</label>
+            <input type="range" id="spread" min="0" max="5" step="0.1" value="1.0">
+        </div>
+
+        <div class="control-group">
+            <!-- 状态指示灯，替代摄像头画面 -->
+            <label style="color: #00ff88;">手势状态: <span id="hand-status">等待摄像头...</span></label>
+        </div>
+    </div>
+
+    <script>
+        // --- 1. 全局变量与初始化 ---
+        let scene, camera, renderer;
+        let particles, geometry, material;
+        let bgParticles;
+        let positions, targetPositions;
+        let count = 15000;
+        let clock = new THREE.Clock();
+        
+        // 状态变量
+        let currentShape = 'nebula';
+        let isDrawMode = false;
+        let handOpenFactor = 0; // 0 = 闭合, 1 = 张开
+        let targetOpenFactor = 0;
+        
+        // 自定义绘制数据
+        let drawnPoints = [];
+        let raycaster = new THREE.Raycaster();
+        let mouse = new THREE.Vector2();
+        let plane = new THREE.Plane(new THREE.Vector3(0, 0, 1), 0);
+
+        // UI 变量引用
+        const colorPicker = document.getElementById('colorPicker');
+        const densitySlider = document.getElementById('density');
+        const spreadSlider = document.getElementById('spread');
+        const handStatus = document.getElementById('hand-status');
+        const drawInstruction = document.getElementById('draw-instruction');
+        const loadingDiv = document.getElementById('loading');
+
+        initThree();
+        initBackground();
+        initParticles();
+        setupInteraction();
+        initMediaPipe();
+        animate();
+
+        // --- 2. Three.js 核心设置 ---
+        function initThree() {
+            scene = new THREE.Scene();
+            scene.fog = new THREE.FogExp2(0x050505, 0.002);
+
+            camera = new THREE.PerspectiveCamera(75, window.innerWidth / window.innerHeight, 0.1, 1000);
+            camera.position.z = 30;
+
+            renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true });
+            renderer.setSize(window.innerWidth, window.innerHeight);
+            renderer.setPixelRatio(window.devicePixelRatio);
+            document.body.appendChild(renderer.domElement);
+
+            window.addEventListener('resize', onWindowResize, false);
+        }
+
+        // --- 3. 粒子系统 (核心逻辑) ---
+        function getTexture() {
+            const canvas = document.createElement('canvas');
+            canvas.width = 32; canvas.height = 32;
+            const ctx = canvas.getContext('2d');
+            const grad = ctx.createRadialGradient(16, 16, 0, 16, 16, 16);
+            grad.addColorStop(0, 'rgba(255,255,255,1)');
+            grad.addColorStop(0.2, 'rgba(255,255,255,0.8)');
+            grad.addColorStop(0.5, 'rgba(255,255,255,0.2)');
+            grad.addColorStop(1, 'rgba(0,0,0,0)');
+            ctx.fillStyle = grad;
+            ctx.fillRect(0, 0, 32, 32);
+            const texture = new THREE.Texture(canvas);
+            texture.needsUpdate = true;
+            return texture;
+        }
+
+        function initParticles() {
+            if (particles) scene.remove(particles);
+
+            count = parseInt(densitySlider.value);
+            geometry = new THREE.BufferGeometry();
+            positions = new Float32Array(count * 3);
+            targetPositions = new Float32Array(count * 3);
+            
+            // 初始化位置（随机）
+            for (let i = 0; i < count; i++) {
+                positions[i * 3] = (Math.random() - 0.5) * 100;
+                positions[i * 3 + 1] = (Math.random() - 0.5) * 100;
+                positions[i * 3 + 2] = (Math.random() - 0.5) * 100;
+            }
+
+            geometry.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+
+            material = new THREE.PointsMaterial({
+                size: 0.4,
+                color: new THREE.Color(colorPicker.value),
+                map: getTexture(),
+                transparent: true,
+                opacity: 0.8,
+                blending: THREE.AdditiveBlending,
+                depthWrite: false
+            });
+
+            particles = new THREE.Points(geometry, material);
+            scene.add(particles);
+
+            calculateTargets(currentShape);
+        }
+
+        function initBackground() {
+            const bgCount = 2000;
+            const bgGeo = new THREE.BufferGeometry();
+            const bgPos = new Float32Array(bgCount * 3);
+            for(let i=0; i<bgCount; i++){
+                bgPos[i*3] = (Math.random() - 0.5) * 200;
+                bgPos[i*3+1] = (Math.random() - 0.5) * 200;
+                bgPos[i*3+2] = (Math.random() - 0.5) * 100 - 20;
+            }
+            bgGeo.setAttribute('position', new THREE.BufferAttribute(bgPos, 3));
+            const bgMat = new THREE.PointsMaterial({
+                size: 0.2, color: 0x888888, transparent: true, opacity: 0.5
+            });
+            bgParticles = new THREE.Points(bgGeo, bgMat);
+            scene.add(bgParticles);
+        }
+
+        // --- 4. 形状算法 ---
+        function calculateTargets(shape) {
+            const scale = 10;
+            
+            if (shape === 'custom' && drawnPoints.length > 0) {
+                for (let i = 0; i < count; i++) {
+                    const sampleIndex = i % drawnPoints.length;
+                    targetPositions[i*3] = drawnPoints[sampleIndex].x + (Math.random()-0.5);
+                    targetPositions[i*3+1] = drawnPoints[sampleIndex].y + (Math.random()-0.5);
+                    targetPositions[i*3+2] = drawnPoints[sampleIndex].z + (Math.random()-0.5) * 2;
+                }
+                return;
+            }
+
+            for (let i = 0; i < count; i++) {
+                let x, y, z;
+                const idx = i * 3;
+
+                if (shape === 'sphere') {
+                    const phi = Math.acos(-1 + (2 * i) / count);
+                    const theta = Math.sqrt(count * Math.PI) * phi;
+                    const r = scale;
+                    x = r * Math.cos(theta) * Math.sin(phi);
+                    y = r * Math.sin(theta) * Math.sin(phi);
+                    z = r * Math.cos(phi);
+                } 
+                else if (shape === 'heart') {
+                    const t = (i / count) * Math.PI * 2;
+                    x = 16 * Math.pow(Math.sin(t), 3);
+                    y = 13 * Math.cos(t) - 5 * Math.cos(2*t) - 2 * Math.cos(3*t) - Math.cos(4*t);
+                    z = (Math.random()-0.5) * 4;
+                    x *= 0.5; y *= 0.5;
+                } 
+                else if (shape === 'nebula') {
+                    const r = Math.random() * scale * 1.5;
+                    const angle = i * 0.02;
+                    x = r * Math.cos(angle + r);
+                    y = r * Math.sin(angle + r) * 0.5;
+                    z = (Math.random() - 0.5) * 5;
+                }
+
+                targetPositions[idx] = x;
+                targetPositions[idx+1] = y;
+                targetPositions[idx+2] = z;
+            }
+        }
+
+        // --- 5. 交互逻辑 ---
+        function setShape(shape) {
+            isDrawMode = false;
+            currentShape = shape;
+            drawInstruction.style.display = 'none';
+            document.querySelectorAll('button').forEach(b => b.classList.remove('active'));
+            document.getElementById(`btn-${shape}`).classList.add('active');
+            calculateTargets(shape);
+        }
+
+        function toggleDrawMode() {
+            isDrawMode = true;
+            currentShape = 'custom';
+            drawnPoints = [];
+            drawInstruction.style.display = 'block';
+            document.querySelectorAll('button').forEach(b => b.classList.remove('active'));
+            document.getElementById('btn-draw').classList.add('active');
+            // 临时散开
+            for(let i=0; i<count*3; i++) targetPositions[i] = (Math.random()-0.5)*50;
+        }
+
+        function setupInteraction() {
+            densitySlider.addEventListener('change', initParticles);
+            colorPicker.addEventListener('input', (e) => material.color.set(e.target.value));
+            
+            let isDragging = false;
+            window.addEventListener('mousedown', () => { if(isDrawMode) isDragging = true; });
+            window.addEventListener('mouseup', () => { 
+                if(isDrawMode && isDragging) {
+                    isDragging = false; 
+                    calculateTargets('custom'); 
+                }
+            });
+            window.addEventListener('mousemove', (event) => {
+                mouse.x = (event.clientX / window.innerWidth) * 2 - 1;
+                mouse.y = -(event.clientY / window.innerHeight) * 2 + 1;
+
+                if (isDrawMode && isDragging) {
+                    raycaster.setFromCamera(mouse, camera);
+                    const intersection = new THREE.Vector3();
+                    raycaster.ray.intersectPlane(plane, intersection);
+                    drawnPoints.push(intersection.clone());
+                    if(drawnPoints.length % 5 === 0) calculateTargets('custom');
+                }
+            });
+        }
+
+        // --- 6. MediaPipe Hands 集成 (后台运行) ---
+        function initMediaPipe() {
+            // 注意：视频元素被 CSS 隐藏了，但仍然被 JS 引用
+            const videoElement = document.getElementById('video-preview');
+
+            const hands = new Hands({locateFile: (file) => {
+                return `https://cdn.jsdelivr.net/npm/@mediapipe/hands/${file}`;
+            }});
+
+            hands.setOptions({
+                maxNumHands: 1,
+                modelComplexity: 1,
+                minDetectionConfidence: 0.5,
+                minTrackingConfidence: 0.5
+            });
+
+            hands.onResults(onHandsResults);
+
+            const cameraUtils = new Camera(videoElement, {
+                onFrame: async () => {
+                    await hands.send({image: videoElement});
+                },
+                width: 320,
+                height: 240
+            });
+            
+            cameraUtils.start()
+                .then(() => {
+                    loadingDiv.style.opacity = '0';
+                    setTimeout(() => loadingDiv.style.display = 'none', 500);
+                    handStatus.innerText = "未检测到手部";
+                })
+                .catch(err => {
+                    loadingDiv.innerText = "初始化失败: 请确保使用 https 或 localhost";
+                    console.error(err);
+                });
+        }
+
+        function onHandsResults(results) {
+            if (results.multiHandLandmarks && results.multiHandLandmarks.length > 0) {
+                const landmarks = results.multiHandLandmarks[0];
+                const thumbTip = landmarks[4];
+                const indexTip = landmarks[8];
+                
+                // 计算距离判断张合
+                const distance = Math.sqrt(
+                    Math.pow(thumbTip.x - indexTip.x, 2) +
+                    Math.pow(thumbTip.y - indexTip.y, 2)
+                );
+                
+                let factor = (distance - 0.05) * 5; 
+                factor = Math.max(0, Math.min(1, factor));
+                targetOpenFactor = factor;
+
+                handStatus.innerText = targetOpenFactor > 0.6 ? "张开 (扩散中)" : "握拳 (聚合中)";
+                handStatus.style.color = targetOpenFactor > 0.6 ? "#ff0055" : "#00ff88";
+            } else {
+                handStatus.innerText = "未检测到手部";
+                handStatus.style.color = "#aaa";
+                targetOpenFactor = 0; 
+            }
+        }
+
+        // --- 7. 动画循环 ---
+        function animate() {
+            requestAnimationFrame(animate);
+
+            const time = clock.getElapsedTime();
+            const positions = particles.geometry.attributes.position.array;
+
+            handOpenFactor = THREE.MathUtils.lerp(handOpenFactor, targetOpenFactor, 0.1);
+
+            const spreadBase = parseFloat(spreadSlider.value);
+            const explosionForce = handOpenFactor * 5.0; 
+
+            for (let i = 0; i < count; i++) {
+                const idx = i*3;
+                const px = positions[idx];
+                const py = positions[idx+1];
+                const pz = positions[idx+2];
+
+                const tx = targetPositions[idx];
+                const ty = targetPositions[idx+1];
+                const tz = targetPositions[idx+2];
+
+                // 物理计算
+                let vx = (tx - px) * 0.05; 
+                let vy = (ty - py) * 0.05;
+                let vz = (tz - pz) * 0.05;
+
+                // 噪声
+                const noiseX = Math.sin(time * 0.5 + py * 0.1) * 0.05;
+                const noiseY = Math.cos(time * 0.3 + px * 0.1) * 0.05;
+                
+                // 手势控制：张开手 -> 爆炸
+                if (handOpenFactor > 0.1) {
+                    const len = Math.sqrt(px*px + py*py + pz*pz) + 0.01;
+                    const explodeMult = explosionForce * (1.0 + Math.random());
+                    vx += (px / len) * explodeMult;
+                    vy += (py / len) * explodeMult;
+                    vz += (pz / len) * explodeMult;
+                }
+                
+                vx += (Math.random() - 0.5) * spreadBase * 0.1;
+                vy += (Math.random() - 0.5) * spreadBase * 0.1;
+                vz += (Math.random() - 0.5) * spreadBase * 0.1;
+
+                positions[idx] += vx;
+                positions[idx+1] += vy + noiseY;
+                positions[idx+2] += vz + noiseX;
+            }
+
+            particles.geometry.attributes.position.needsUpdate = true;
+            particles.rotation.y = time * 0.05;
+            if(bgParticles) bgParticles.rotation.y = time * 0.02;
+
+            renderer.render(scene, camera);
+        }
+
+        function onWindowResize() {
+            camera.aspect = window.innerWidth / window.innerHeight;
+            camera.updateProjectionMatrix();
+            renderer.setSize(window.innerWidth, window.innerHeight);
+        }
+    </script>
+</body>
+</html>
